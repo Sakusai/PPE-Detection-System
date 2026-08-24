@@ -20,13 +20,14 @@
 #define MAX_PL_LEN          250
 #define WAIT_DELAY_MS       2
 
-#define TARGET_PERSON_ID    0    
-#define CONFIDENCE_THRESHOLD 75   
+#define TARGET_PERSON_ID     2    
+#define TARGET_GLASSES_ID    1 
+#define CONFIDENCE_THRESHOLD 70   
 
-#define CONFIRMATION_FRAMES 5    
-#define ABSENCE_FRAMES      5    
+#define CONFIRMATION_FRAMES  5    
+#define ABSENCE_FRAMES       5  
 
-static const char *TAG = "EPI_PERSON_DETECTOR";
+static const char *TAG = "EPI_SYSTEM";
 
 typedef enum {
     STATE_ABSENT,
@@ -37,13 +38,10 @@ typedef struct {
     presence_state_t state;
     int detection_counter;
     int absence_counter;
-} person_tracker_t;
+} tracker_t;
 
-static person_tracker_t g_tracker = {
-    .state = STATE_ABSENT,
-    .detection_counter = 0,
-    .absence_counter = 0
-};
+static tracker_t g_glasses_tracker = { .state = STATE_ABSENT, .detection_counter = 0, .absence_counter = 0 };
+static tracker_t g_person_tracker  = { .state = STATE_ABSENT, .detection_counter = 0, .absence_counter = 0 };
 
 static esp_err_t sscma_i2c_ctrl(uint8_t cmd, uint16_t len, const uint8_t *payload)
 {
@@ -140,33 +138,26 @@ static bool sscma_read_raw(char *out, size_t out_size, int timeout_ms)
     return total > 0;
 }
 
-void process_person_detection(bool person_detected_in_frame, int max_confidence) {
-    if (person_detected_in_frame) {
-        g_tracker.absence_counter = 0; 
-        g_tracker.detection_counter++;
+static void update_tracker(tracker_t *tracker, bool detected, int score, const char *label_present, const char *label_absent) {
+    if (detected) {
+        tracker->absence_counter = 0;
+        tracker->detection_counter++;
 
-        if (g_tracker.state == STATE_ABSENT) {
-            ESP_LOGI(TAG, "Détection suspecte... (%d/%d trames)", 
-                     g_tracker.detection_counter, CONFIRMATION_FRAMES);
-
-            if (g_tracker.detection_counter >= CONFIRMATION_FRAMES) {
-                g_tracker.state = STATE_PRESENT;
-                ESP_LOGW(TAG, "PERSONNE CONFIRMÉE PRÉSENTE ! (Confiance: %d%%)", max_confidence);
+        if (tracker->state == STATE_ABSENT) {
+            if (tracker->detection_counter >= CONFIRMATION_FRAMES) {
+                tracker->state = STATE_PRESENT;
+                ESP_LOGW(TAG, "🟢 %s (Confiance: %d%%)", label_present, score);
             }
-        } else {
-            ESP_LOGD(TAG, "Personne toujours présente (Confiance: %d%%)", max_confidence);
         }
     } else {
-        g_tracker.detection_counter = 0; 
-        
-        if (g_tracker.state == STATE_PRESENT) {
-            g_tracker.absence_counter++;
-            ESP_LOGI(TAG, "Absence suspecte... (%d/%d trames)", 
-                     g_tracker.absence_counter, ABSENCE_FRAMES);
+        tracker->detection_counter = 0;
 
-            if (g_tracker.absence_counter >= ABSENCE_FRAMES) {
-                g_tracker.state = STATE_ABSENT;
-                ESP_LOGI(TAG, "LA PERSONNE EST PARTIE.");
+        if (tracker->state == STATE_PRESENT) {
+            tracker->absence_counter++;
+
+            if (tracker->absence_counter >= ABSENCE_FRAMES) {
+                tracker->state = STATE_ABSENT;
+                ESP_LOGE(TAG, "🔴 %s", label_absent);
             }
         }
     }
@@ -183,30 +174,41 @@ static void parse_sscma_response(const char *json_str) {
             boxes = cJSON_GetObjectItem(data, "boxes");
         }
     }
-    
-    bool person_found = false;
-    int max_confidence = 0;
+
+    bool glasses_found = false;
+    bool person_found  = false;
+    int glasses_conf   = 0;
+    int person_conf    = 0;
 
     if (boxes && cJSON_IsArray(boxes)) {
         int count = cJSON_GetArraySize(boxes);
-        
+
         for (int i = 0; i < count; i++) {
             cJSON *box = cJSON_GetArrayItem(boxes, i);
             if (cJSON_IsArray(box) && cJSON_GetArraySize(box) >= 6) {
                 int score  = cJSON_GetArrayItem(box, 4)->valueint;
                 int target = cJSON_GetArrayItem(box, 5)->valueint;
 
+                // Filtrage Glasses (Target ID 2)
+                if (target == TARGET_GLASSES_ID && score >= CONFIDENCE_THRESHOLD) {
+                    glasses_found = true;
+                    if (score > glasses_conf) glasses_conf = score;
+                }
+
+                // Filtrage Person (Target ID 1)
                 if (target == TARGET_PERSON_ID && score >= CONFIDENCE_THRESHOLD) {
                     person_found = true;
-                    if (score > max_confidence) {
-                        max_confidence = score;
-                    }
+                    if (score > person_conf) person_conf = score;
                 }
             }
         }
     }
 
-    process_person_detection(person_found, max_confidence);
+    update_tracker(&g_person_tracker, person_found, person_conf, 
+                   "PERSON DETECTED", "PERSON OUT");
+
+    update_tracker(&g_glasses_tracker, glasses_found, glasses_conf, 
+                   "CONFIRMED PRESENCE OF GLASSES !", "GLASSES REMOVED / MISSING");
 
     cJSON_Delete(root);
 }
@@ -224,10 +226,10 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
 
-    ESP_LOGI(TAG, "Démarrage et initialisation du capteur SSCMA...");
+    ESP_LOGI(TAG, "Démarrage du système de contrôle EPI (Personne + Lunettes)...");
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    sscma_send_at("INVOKE=-1,0,1"); 
+    sscma_send_at("INVOKE=1");
 
     static char response[4096]; 
 
