@@ -27,7 +27,7 @@
 #define CONFIRMATION_FRAMES  5    
 #define ABSENCE_FRAMES       5  
 
-static const char *TAG = "EPI_SYSTEM";
+static const char *TAG = "PPE_SYSTEM";
 
 typedef enum {
     STATE_ABSENT,
@@ -226,7 +226,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
 
-    ESP_LOGI(TAG, "Démarrage du système de contrôle EPI (Personne + Lunettes)...");
+    ESP_LOGI(TAG, "Start PPE DETECTION");
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     sscma_send_at("INVOKE=1");
